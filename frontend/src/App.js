@@ -11,6 +11,7 @@ import Matches from "@/pages/Matches";
 import Chats from "@/pages/Chats";
 import Dates from "@/pages/Dates";
 import InviteDates from "@/pages/InviteDates";
+import VipBookings from "@/pages/VipBookings";
 import SpinPage from "@/pages/SpinPage";
 import Wallet from "@/pages/Wallet";
 import Profile from "@/pages/Profile";
@@ -50,6 +51,7 @@ const Shell = () => (
       <Route path="/matches" element={<Private><Matches /></Private>} />
       <Route path="/chats" element={<Private><Chats /></Private>} />
       <Route path="/dates" element={<Private><InviteDates /></Private>} />
+      <Route path="/vip-bookings" element={<Private><VipBookings /></Private>} />
       <Route path="/spin" element={<Private><SpinPage /></Private>} />
       <Route path="/wallet" element={<Private><Wallet /></Private>} />
       <Route path="/profile" element={<Private><Profile /></Private>} />

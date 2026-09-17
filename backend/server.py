@@ -593,6 +593,9 @@ async def _startup():
     await db.spins.create_index([("ip", 1), ("used", 1)])
     await db.date_ideas.create_index("id", unique=True)
     await db.coin_transactions.create_index([("user_id", 1), ("created_at", -1)])
+    await db.vip_avail.create_index([("vip_id", 1), ("date", 1)])
+    await db.vip_sched.create_index([("vip_id", 1), ("date", 1), ("status", 1)])
+    await db.vip_sched.create_index([("requester_id", 1), ("status", 1)])
     for idea in build_catalog():
         await db.date_ideas.update_one({"id": idea["id"]}, {"$setOnInsert": idea}, upsert=True)
     logging.info("GiftsDates backend ready")
@@ -2363,6 +2366,285 @@ async def vip_book(req: DateBookingReq, user=Depends(get_current_user)):
     await db.date_bookings.insert_one(doc)
     await notify(recipient_id, "date_request", "New VIP booking 📅", f"{user['name']} booked you · 🪙 {req.coins}. Manage in Dates.", {"booking_id": bid}, email=True)
     return {"booking_id": bid, "status": "escrow"}
+
+# ==================== VIP Scheduling (Availability Calendar + Bookings) ====================
+# Separate slot-based booking layer for VIP profiles with a 15-minute buffer, statuses and
+# double-booking protection. Times are stored as HH:MM in the VIP's own local timezone.
+VIP_SCHED_BUFFER = 15  # minutes locked before AND after each booking
+VIP_SCHED_ACTIVE = ["pending", "confirmed"]  # statuses that hold/lock a slot
+
+class VipAvailReq(BaseModel):
+    date: str            # YYYY-MM-DD
+    start: str           # HH:MM
+    end: str             # HH:MM
+    slot_len: int = 60   # minutes per bookable slot (VIP chooses)
+    tz: Optional[str] = None
+
+class VipSchedBookReq(BaseModel):
+    date: str
+    start: str
+    end: str
+    coins: int
+    activity: Optional[str] = ""
+    venue: Optional[str] = ""
+    tz: Optional[str] = None
+
+def _vs_today():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+def _vs_conflict(ns: int, ne: int, existing: list) -> bool:
+    """A candidate [ns,ne] conflicts if it comes within VIP_SCHED_BUFFER minutes of any
+    existing active booking [bs,be]. This enforces a 15-min gap on both sides."""
+    for b in existing:
+        bs, be = _hm_to_min(b["start"]), _hm_to_min(b["end"])
+        if ns < be + VIP_SCHED_BUFFER and bs < ne + VIP_SCHED_BUFFER:
+            return True
+    return False
+
+def _vs_gen_slots(block: dict, bookings: list):
+    """Split a VIP availability block into consecutive slots of block.slot_len and tag each
+    with a visual state: available / pending / confirmed / locked."""
+    S, E = _hm_to_min(block["start"]), _hm_to_min(block["end"])
+    L = max(15, int(block.get("slot_len") or 60))
+    out = []
+    s = S
+    while s + L <= E:
+        e = s + L
+        sf, st = _min_to_hm(s), _min_to_hm(e)
+        exact = next((b for b in bookings if b["start"] == sf and b["end"] == st), None)
+        if exact and exact["status"] == "confirmed":
+            state = "confirmed"
+        elif exact and exact["status"] == "pending":
+            state = "pending"
+        elif _vs_conflict(s, e, bookings):
+            state = "locked"
+        else:
+            state = "available"
+        out.append({"start": sf, "end": st, "state": state, "slot_len": L})
+        s += L
+    return out
+
+async def _vs_requester_card(uid: str) -> dict:
+    u = await db.users.find_one({"id": uid}, {"_id": 0, "id": 1, "name": 1, "age": 1, "city": 1, "country": 1, "photos": 1})
+    if not u:
+        return {"id": uid, "name": "User", "photo": None}
+    return {"id": u["id"], "name": u.get("name") or "User", "age": u.get("age"),
+            "city": u.get("city"), "country": u.get("country"),
+            "photo": (u.get("photos") or [None])[0]}
+
+def _vs_clean(b: dict) -> dict:
+    return {k: v for k, v in b.items() if k != "_id"}
+
+async def _vs_autocomplete(vip_id: str):
+    """Lazily mark confirmed bookings whose end time has passed as completed and release escrow."""
+    now = datetime.now(timezone.utc)
+    conf = await db.vip_sched.find({"vip_id": vip_id, "status": "confirmed"}).to_list(500)
+    for b in conf:
+        try:
+            end_dt = datetime.fromisoformat(f"{b['date']}T{b['end']}:00+00:00")
+        except Exception:
+            continue
+        if end_dt <= now:
+            coins = int(b.get("coins") or 0)
+            await db.vip_sched.update_one({"id": b["id"]}, {"$set": {"status": "completed", "completed_at": now.isoformat()}})
+            if coins:
+                await db.users.update_one({"id": vip_id}, {"$inc": {"escrow": -coins, "withdrawable": coins}})
+            await notify(b["requester_id"], "vs_completed", "Date completed ✅",
+                         f"Your date on {b['date']} at {b['start']} is marked completed.", {"booking_id": b["id"]})
+
+@api.get("/vip/schedule/me")
+async def vs_my_schedule(user=Depends(get_current_user)):
+    """VIP dashboard: my availability blocks (today onward) + my incoming bookings grouped."""
+    await _vs_autocomplete(user["id"])
+    today = _vs_today()
+    blocks = await db.vip_avail.find({"vip_id": user["id"], "date": {"$gte": today}}, {"_id": 0}).sort([("date", 1), ("start", 1)]).to_list(500)
+    raw = await db.vip_sched.find({"vip_id": user["id"]}, {"_id": 0}).sort([("date", 1), ("start", 1)]).to_list(1000)
+    bookings = []
+    for b in raw:
+        b["requester"] = await _vs_requester_card(b["requester_id"])
+        bookings.append(b)
+    pending = [b for b in bookings if b["status"] == "pending"]
+    confirmed = [b for b in bookings if b["status"] == "confirmed"]
+    past = [b for b in bookings if b["status"] in ("completed", "declined", "cancelled")]
+    return {"is_vip": is_vip(user), "blocks": blocks,
+            "pending": pending, "confirmed": confirmed, "past": past,
+            "pending_count": len(pending), "buffer": VIP_SCHED_BUFFER}
+
+@api.get("/vip/schedule/pending-count")
+async def vs_pending_count(user=Depends(get_current_user)):
+    n = await db.vip_sched.count_documents({"vip_id": user["id"], "status": "pending"})
+    return {"count": n}
+
+@api.post("/vip/schedule/availability")
+async def vs_add_availability(req: VipAvailReq, user=Depends(get_current_user)):
+    if not is_vip(user):
+        raise HTTPException(403, "VIP_REQUIRED")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", req.date):
+        raise HTTPException(400, "Invalid date")
+    if req.date < _vs_today():
+        raise HTTPException(400, "DATE_PAST")
+    s, e = _hm_to_min(req.start), _hm_to_min(req.end)
+    if s >= e:
+        raise HTTPException(400, "BAD_WINDOW")
+    slot_len = max(15, min(240, int(req.slot_len or 60)))
+    if e - s < slot_len:
+        raise HTTPException(400, "WINDOW_TOO_SHORT")
+    doc = {"id": str(uuid.uuid4()), "vip_id": user["id"], "date": req.date,
+           "start": _min_to_hm(s), "end": _min_to_hm(e), "slot_len": slot_len,
+           "tz": (req.tz or user.get("timezone") or "UTC"),
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.vip_avail.insert_one(doc)
+    return _vs_clean(doc)
+
+@api.delete("/vip/schedule/availability/{aid}")
+async def vs_del_availability(aid: str, user=Depends(get_current_user)):
+    blk = await db.vip_avail.find_one({"id": aid})
+    if not blk:
+        raise HTTPException(404, "Not found")
+    if blk["vip_id"] != user["id"]:
+        raise HTTPException(403, "Not owner")
+    active = await db.vip_sched.find_one({"vip_id": user["id"], "date": blk["date"], "status": {"$in": VIP_SCHED_ACTIVE}})
+    if active:
+        raise HTTPException(400, "HAS_BOOKINGS")
+    await db.vip_avail.delete_one({"id": aid})
+    return {"ok": True}
+
+@api.get("/vip/schedule/{vip_id}/slots")
+async def vs_public_slots(vip_id: str, user=Depends(get_current_user)):
+    """Public: bookable slots for a VIP, grouped by date, each tagged with a visual state."""
+    target = await db.users.find_one({"id": vip_id}, {"_id": 0, "id": 1, "timezone": 1})
+    if not target:
+        raise HTTPException(404, "Not found")
+    await _vs_autocomplete(vip_id)
+    today = _vs_today()
+    blocks = await db.vip_avail.find({"vip_id": vip_id, "date": {"$gte": today}}, {"_id": 0}).sort([("date", 1), ("start", 1)]).to_list(500)
+    active = await db.vip_sched.find({"vip_id": vip_id, "status": {"$in": VIP_SCHED_ACTIVE}},
+                                     {"_id": 0, "date": 1, "start": 1, "end": 1, "status": 1}).to_list(1000)
+    by_date = {}
+    tz = blocks[0]["tz"] if blocks else (target.get("timezone") or "UTC")
+    for blk in blocks:
+        day_bk = [b for b in active if b["date"] == blk["date"]]
+        slots = _vs_gen_slots(blk, day_bk)
+        by_date.setdefault(blk["date"], {"date": blk["date"], "tz": blk.get("tz") or tz, "slots": []})
+        by_date[blk["date"]]["slots"].extend(slots)
+    days = sorted(by_date.values(), key=lambda d: d["date"])
+    return {"tz": tz, "buffer": VIP_SCHED_BUFFER, "days": days}
+
+@api.post("/vip/schedule/{vip_id}/book")
+async def vs_book(vip_id: str, req: VipSchedBookReq, user=Depends(get_current_user)):
+    if vip_id == user["id"]:
+        raise HTTPException(400, "CANNOT_BOOK_SELF")
+    target = await db.users.find_one({"id": vip_id})
+    if not target:
+        raise HTTPException(404, "Recipient not found")
+    if req.coins <= 0:
+        raise HTTPException(400, "Invalid amount")
+    if (user.get("coins", 0) + user.get("withdrawable", 0)) < req.coins:
+        raise HTTPException(400, "Insufficient coins")
+    ns, ne = _hm_to_min(req.start), _hm_to_min(req.end)
+    if ns >= ne:
+        raise HTTPException(400, "BAD_TIME")
+    # 1) the requested slot must fall inside one of the VIP's availability blocks
+    blocks = await db.vip_avail.find({"vip_id": vip_id, "date": req.date}, {"_id": 0}).to_list(200)
+    fits = any(_hm_to_min(b["start"]) <= ns and ne <= _hm_to_min(b["end"]) for b in blocks)
+    if not fits:
+        raise HTTPException(400, "TIME_UNAVAILABLE")
+    # 2) re-validate against active bookings immediately before creating (double-booking guard)
+    active = await db.vip_sched.find({"vip_id": vip_id, "date": req.date, "status": {"$in": VIP_SCHED_ACTIVE}},
+                                     {"_id": 0, "start": 1, "end": 1}).to_list(500)
+    if _vs_conflict(ns, ne, active):
+        raise HTTPException(409, "SLOT_TAKEN")
+    now = datetime.now(timezone.utc)
+    tz = req.tz or (blocks[0]["tz"] if blocks else (target.get("timezone") or "UTC"))
+    bid = str(uuid.uuid4())
+    doc = {"id": bid, "vip_id": vip_id, "requester_id": user["id"],
+           "date": req.date, "start": req.start, "end": req.end,
+           "lock_start": _min_to_hm(max(0, ns - VIP_SCHED_BUFFER)),
+           "lock_end": _min_to_hm(ne + VIP_SCHED_BUFFER),
+           "activity": (req.activity or "").strip(), "venue": (req.venue or "").strip(),
+           "coins": int(req.coins), "status": "pending", "tz": tz,
+           "created_at": now.isoformat(), "scheduled_at": f"{req.date}T{req.start}:00"}
+    # atomic-ish: guard collection has a unique index on (vip_id,date,start) for active rows via a lock doc
+    await spend_coins(user["id"], req.coins)
+    await db.users.update_one({"id": vip_id}, {"$inc": {"escrow": req.coins}})
+    await db.vip_sched.insert_one(doc)
+    await notify(vip_id, "vs_request", "New date request 📅",
+                 f"{user['name']} requested a date on {req.date} · {req.start}–{req.end} · 🪙 {req.coins}. Review in VIP Bookings.",
+                 {"booking_id": bid}, email=True, link=f"{PUBLIC_APP_URL}/vip-bookings", cta="Open VIP Bookings")
+    await notify(user["id"], "vs_submitted", "Request sent 📨",
+                 f"Your date request on {req.date} · {req.start}–{req.end} is pending confirmation.", {"booking_id": bid})
+    return {"booking_id": bid, "status": "pending"}
+
+@api.post("/vip/schedule/bookings/{bid}/confirm")
+async def vs_confirm(bid: str, user=Depends(get_current_user)):
+    b = await db.vip_sched.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Not found")
+    if b["vip_id"] != user["id"]:
+        raise HTTPException(403, "Only the VIP can confirm")
+    if b["status"] != "pending":
+        raise HTTPException(400, "NOT_PENDING")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.vip_sched.update_one({"id": bid}, {"$set": {"status": "confirmed", "confirmed_at": now}})
+    await notify(b["requester_id"], "vs_confirmed", "Date confirmed 💃",
+                 f"{user['name']} confirmed your date on {b['date']} · {b['start']}–{b['end']}.",
+                 {"booking_id": bid}, email=True)
+    return {"status": "confirmed"}
+
+async def _vs_release(b: dict, actor_name: str, reason: str):
+    """Refund the requester and release the VIP's escrow, freeing the slot."""
+    coins = int(b.get("coins") or 0)
+    if coins:
+        await db.users.update_one({"id": b["requester_id"]}, {"$inc": {"coins": coins}})
+        await db.users.update_one({"id": b["vip_id"]}, {"$inc": {"escrow": -coins}})
+
+@api.post("/vip/schedule/bookings/{bid}/decline")
+async def vs_decline(bid: str, user=Depends(get_current_user)):
+    b = await db.vip_sched.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Not found")
+    if b["vip_id"] != user["id"]:
+        raise HTTPException(403, "Only the VIP can decline")
+    if b["status"] not in ("pending", "confirmed"):
+        raise HTTPException(400, "CANNOT_DECLINE")
+    now = datetime.now(timezone.utc).isoformat()
+    await _vs_release(b, user["name"], "declined")
+    await db.vip_sched.update_one({"id": bid}, {"$set": {"status": "declined", "declined_at": now}})
+    await notify(b["requester_id"], "vs_declined", "Date declined",
+                 f"{user['name']} declined your date on {b['date']} · {b['start']}–{b['end']}. 🪙 {b.get('coins', 0)} refunded.",
+                 {"booking_id": bid}, email=True)
+    return {"status": "declined", "refunded": b.get("coins", 0)}
+
+@api.post("/vip/schedule/bookings/{bid}/cancel")
+async def vs_cancel(bid: str, user=Depends(get_current_user)):
+    b = await db.vip_sched.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Not found")
+    if user["id"] not in (b["requester_id"], b["vip_id"]):
+        raise HTTPException(403, "Not your booking")
+    if b["status"] not in ("pending", "confirmed"):
+        raise HTTPException(400, "CANNOT_CANCEL")
+    now = datetime.now(timezone.utc).isoformat()
+    await _vs_release(b, user["name"], "cancelled")
+    await db.vip_sched.update_one({"id": bid}, {"$set": {"status": "cancelled", "cancelled_at": now, "cancelled_by": user["id"]}})
+    other = b["vip_id"] if user["id"] == b["requester_id"] else b["requester_id"]
+    await notify(other, "vs_cancelled", "Date cancelled",
+                 f"{user['name']} cancelled the date on {b['date']} · {b['start']}–{b['end']}. 🪙 {b.get('coins', 0)} refunded to the requester.",
+                 {"booking_id": bid}, email=True)
+    return {"status": "cancelled", "refunded": b.get("coins", 0)}
+
+@api.get("/vip/schedule/bookings/mine")
+async def vs_my_requests(user=Depends(get_current_user)):
+    """Bookings I (as a requester) made, grouped."""
+    raw = await db.vip_sched.find({"requester_id": user["id"]}, {"_id": 0}).sort([("date", 1), ("start", 1)]).to_list(500)
+    out = []
+    for b in raw:
+        vip = await db.users.find_one({"id": b["vip_id"]}, {"_id": 0, "id": 1, "name": 1, "photos": 1})
+        b["vip_card"] = {"id": b["vip_id"], "name": (vip or {}).get("name") or "VIP", "photo": ((vip or {}).get("photos") or [None])[0]}
+        out.append(b)
+    return {"requests": out}
+# ==================== end VIP Scheduling ====================
+
 
 class CoinPremiumReq(BaseModel):
     tier: str = "premium"

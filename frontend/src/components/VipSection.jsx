@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
 import AddressPicker from "./AddressPicker";
 import { PRICE_KEYS, svcLabel, placeLabel, priceLabel } from "../lib/vipCatalog";
+import VipScheduleBookModal from "./VipScheduleBookModal";
 import { t } from "../lib/i18n";
 
 export default function VipSection({ userId, name, preview }) {
@@ -19,6 +20,7 @@ export default function VipSection({ userId, name, preview }) {
   const [loc, setLoc] = useState({});
   const [busy, setBusy] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
+  const [schedOpen, setSchedOpen] = useState(false);
 
   const unlockSection = async () => {
     const price = data?.unlock_price || 100;
@@ -190,6 +192,23 @@ export default function VipSection({ userId, name, preview }) {
           </div>
         </div>
       )}
+
+      {!data.is_owner && (
+        <div data-testid="vip-schedule-book-cta">
+          <div className="text-sm font-semibold text-amber-200 mb-2 flex items-center gap-1.5"><Calendar size={15} /> Availability calendar</div>
+          <p className="text-xs text-slate-400 mb-2">Pick an exact time slot from this VIP's calendar. A 15-minute buffer is protected around every date.</p>
+          <Button data-testid="vip-open-schedule" onClick={() => setSchedOpen(true)} className="rose-btn text-white border-0 w-full sm:w-auto">
+            <Calendar size={15} className="me-1.5" /> Book from calendar
+          </Button>
+        </div>
+      )}
+
+      <VipScheduleBookModal
+        open={schedOpen}
+        onOpenChange={setSchedOpen}
+        target={{ id: userId, name: data.name || name, city: data.city }}
+        defaultCoins={v.date_price || (v.prices && Object.values(v.prices).find((x) => x > 0)) || undefined}
+      />
 
       <Dialog open={!!slot} onOpenChange={(o) => { if (!o) { setSlot(null); setPlace(null); setLoc({}); } }}>
         <DialogContent className="bg-[#161018] border-white/10 text-white max-w-sm max-h-[85vh] overflow-y-auto" data-testid="vip-book-dialog">

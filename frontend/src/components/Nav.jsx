@@ -1,10 +1,11 @@
 import React from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
-import { Heart, Wallet, MessageCircle, Search, Crown, LogOut, CalendarHeart, Sparkles } from "lucide-react";
+import { Heart, Wallet, MessageCircle, Search, Crown, LogOut, CalendarHeart, Sparkles, CalendarClock } from "lucide-react";
 import { Button } from "./ui/button";
 import LanguageSwitcher from "./LanguageSwitcher";
 import NotificationBell from "./NotificationBell";
 import { useApp } from "../context/AppContext";
+import { api } from "../lib/api";
 import { t } from "../lib/i18n";
 
 export default function Nav() {
@@ -14,10 +15,21 @@ export default function Nav() {
   const isPremium = user?.premium_until && new Date(user.premium_until) > new Date();
   const isVip = user?.vip_until && new Date(user.vip_until) > new Date();
   const isLite = user?.premium_lite_until && new Date(user.premium_lite_until) > new Date();
+  const [vsPending, setVsPending] = React.useState(0);
 
-  const NavLink = ({ to, icon: Icon, label, testid }) => (
-    <Link to={to} data-testid={testid} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all ${loc.pathname === to ? "bg-rose-500/15 text-rose-300 border border-rose-500/30" : "text-slate-300 hover:bg-white/5 hover:text-white"}`}>
+  React.useEffect(() => {
+    if (!user) { setVsPending(0); return; }
+    let alive = true;
+    const fetchCount = () => api.get("/vip/schedule/pending-count").then((r) => { if (alive) setVsPending(r.data.count || 0); }).catch(() => {});
+    fetchCount();
+    const id = setInterval(fetchCount, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, [user, loc.pathname]);
+
+  const NavLink = ({ to, icon: Icon, label, testid, badge }) => (
+    <Link to={to} data-testid={testid} className={`relative flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all ${loc.pathname === to ? "bg-rose-500/15 text-rose-300 border border-rose-500/30" : "text-slate-300 hover:bg-white/5 hover:text-white"}`}>
       <Icon size={16} /> <span className="hidden md:inline">{label}</span>
+      {badge > 0 && <span data-testid="nav-vip-bookings-badge" className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold flex items-center justify-center">{badge}</span>}
     </Link>
   );
 
@@ -40,6 +52,7 @@ export default function Nav() {
             <NavLink to="/matches" icon={Heart} label={t("matches", lang)} testid="nav-link-matches" />
             <NavLink to="/chats" icon={MessageCircle} label={t("chats", lang)} testid="nav-link-chats" />
             <NavLink to="/dates" icon={CalendarHeart} label={t("dates", lang)} testid="nav-link-dates" />
+            <NavLink to="/vip-bookings" icon={CalendarClock} label="VIP Bookings" testid="nav-link-vip-bookings" badge={vsPending} />
             {spinEligible && <NavLink to="/spin" icon={Sparkles} label={t("sp_nav", lang)} testid="nav-link-spin" />}
             <NavLink to="/wallet" icon={Wallet} label={t("wallet", lang)} testid="nav-link-wallet" />
           </nav>
