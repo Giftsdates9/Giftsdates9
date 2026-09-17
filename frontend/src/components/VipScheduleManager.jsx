@@ -3,9 +3,10 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Calendar } from "./ui/calendar";
-import { Clock, Plus, Trash2, CalendarClock, Loader2 } from "lucide-react";
+import { Clock, Plus, Trash2, CalendarClock, Loader2, Repeat } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "../lib/api";
+import { Switch } from "./ui/switch";
 
 const toKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const fromKey = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
@@ -14,6 +15,7 @@ const minHm = (x) => `${String(Math.floor(x / 60)).padStart(2, "0")}:${String(x 
 const fmtDay = (d) => { try { return fromKey(d).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }); } catch { return d; } };
 
 const SLOT_LENGTHS = [30, 45, 60, 90, 120];
+const WEEKDAYS = [["Mon", 0], ["Tue", 1], ["Wed", 2], ["Thu", 3], ["Fri", 4], ["Sat", 5], ["Sun", 6]];
 
 function previewSlots(start, end, len) {
   const s = hmMin(start), e = hmMin(end), L = Math.max(15, len);
@@ -28,18 +30,29 @@ export default function VipScheduleManager({ blocks = [], onChanged }) {
   const [end, setEnd] = useState("22:00");
   const [slotLen, setSlotLen] = useState(60);
   const [saving, setSaving] = useState(false);
+  const [repeat, setRepeat] = useState(false);
+  const [weekdays, setWeekdays] = useState([]);
+  const [weeks, setWeeks] = useState(8);
+
+  const toggleWeekday = (n) => setWeekdays((w) => w.includes(n) ? w.filter((x) => x !== n) : [...w, n]);
 
   const add = async () => {
     if (hmMin(start) >= hmMin(end)) { toast.error("End time must be after start time"); return; }
     if (hmMin(end) - hmMin(start) < slotLen) { toast.error("Window is shorter than one slot"); return; }
     setSaving(true);
     try {
-      await api.post("/vip/schedule/availability", { date: day, start, end, slot_len: slotLen });
-      toast.success("Availability added");
+      if (repeat) {
+        if (weekdays.length === 0) { toast.error("Pick at least one weekday to repeat"); setSaving(false); return; }
+        const r = await api.post("/vip/schedule/availability/recurring", { weekdays, start, end, slot_len: slotLen, weeks });
+        toast.success(`Added ${r.data.created} weekly slot day(s)`);
+      } else {
+        await api.post("/vip/schedule/availability", { date: day, start, end, slot_len: slotLen });
+        toast.success("Availability added");
+      }
       onChanged?.();
     } catch (e) {
       const d = e.response?.data?.detail || "";
-      toast.error(d === "VIP_REQUIRED" ? "VIP membership required" : d === "DATE_PAST" ? "Pick a future date" : d || "Could not add");
+      toast.error(d === "VIP_REQUIRED" ? "VIP membership required" : d === "DATE_PAST" ? "Pick a future date" : d === "NO_WEEKDAYS" ? "Pick at least one weekday" : d || "Could not add");
     } finally { setSaving(false); }
   };
 
@@ -99,6 +112,31 @@ export default function VipScheduleManager({ blocks = [], onChanged }) {
                 ))}
               </div>
             </div>
+            <div className="mt-3 rounded-lg border border-white/10 bg-white/5 p-3">
+              <div className="flex items-center justify-between">
+                <Label className="text-[11px] text-slate-300 flex items-center gap-1.5"><Repeat size={12} /> Repeat weekly</Label>
+                <Switch data-testid="vs-avail-repeat" checked={repeat} onCheckedChange={setRepeat} />
+              </div>
+              {repeat && (
+                <div className="mt-2.5" data-testid="vs-avail-recurring">
+                  <div className="flex flex-wrap gap-1.5">
+                    {WEEKDAYS.map(([lbl, n]) => (
+                      <button key={n} type="button" onClick={() => toggleWeekday(n)}
+                        data-testid={`vs-avail-wd-${n}`}
+                        className={`px-2 py-1 rounded-md border text-[11px] transition-colors ${weekdays.includes(n) ? "bg-rose-500 border-rose-500 text-white" : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"}`}>
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 mt-2">
+                    <Label className="text-[11px] text-slate-400">for the next</Label>
+                    <Input data-testid="vs-avail-weeks" type="number" min={1} max={26} value={weeks}
+                      onChange={(e) => setWeeks(Math.max(1, Math.min(26, parseInt(e.target.value || 1))))} className="bg-white/5 border-white/10 h-8 w-16" />
+                    <span className="text-[11px] text-slate-400">weeks</span>
+                  </div>
+                </div>
+              )}
+            </div>
             {preview.length > 0 && (
               <div className="mt-3">
                 <p className="text-[11px] text-slate-400 mb-1.5">Bookable slots ({preview.length})</p>
@@ -110,7 +148,7 @@ export default function VipScheduleManager({ blocks = [], onChanged }) {
               </div>
             )}
             <Button data-testid="vs-avail-add" onClick={add} disabled={saving} className="rose-btn text-white border-0 w-full mt-4 h-10">
-              {saving ? <Loader2 size={15} className="animate-spin" /> : <><Plus size={15} className="me-1" /> Add availability</>}
+              {saving ? <Loader2 size={15} className="animate-spin" /> : <><Plus size={15} className="me-1" /> {repeat ? "Add weekly availability" : "Add availability"}</>}
             </Button>
           </div>
 
@@ -126,6 +164,7 @@ export default function VipScheduleManager({ blocks = [], onChanged }) {
                     <div className="flex flex-wrap gap-1.5">
                       {byDate[d].sort((a, b) => a.start.localeCompare(b.start)).map((b) => (
                         <span key={b.id} data-testid={`vs-avail-block-${b.id}`} className="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 font-mono-num">
+                          {b.recurring ? <Repeat size={10} className="text-emerald-300" /> : null}
                           {b.start}–{b.end} · {b.slot_len}m
                           <button onClick={() => remove(b.id)} data-testid={`vs-avail-del-${b.id}`} className="text-rose-300 hover:text-rose-200"><Trash2 size={12} /></button>
                         </span>

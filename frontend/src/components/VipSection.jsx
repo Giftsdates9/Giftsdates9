@@ -193,16 +193,6 @@ export default function VipSection({ userId, name, preview }) {
         </div>
       )}
 
-      {!data.is_owner && (
-        <div data-testid="vip-schedule-book-cta">
-          <div className="text-sm font-semibold text-amber-200 mb-2 flex items-center gap-1.5"><Calendar size={15} /> Availability calendar</div>
-          <p className="text-xs text-slate-400 mb-2">Pick an exact time slot from this VIP's calendar. A 15-minute buffer is protected around every date.</p>
-          <Button data-testid="vip-open-schedule" onClick={() => setSchedOpen(true)} className="rose-btn text-white border-0 w-full sm:w-auto">
-            <Calendar size={15} className="me-1.5" /> Book from calendar
-          </Button>
-        </div>
-      )}
-
       <VipScheduleBookModal
         open={schedOpen}
         onOpenChange={setSchedOpen}

@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { api } from "../lib/api";
 import { useApp } from "../context/AppContext";
 import VipScheduleManager from "../components/VipScheduleManager";
+import VipScheduleBookModal from "../components/VipScheduleBookModal";
 
 const fmtDay = (d) => { try { const [y, m, dd] = d.split("-").map(Number); return new Date(y, m - 1, dd).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }); } catch { return d; } };
 
@@ -31,7 +32,7 @@ function Avatar({ card }) {
   );
 }
 
-function BookingCard({ b, who, onConfirm, onDecline, onCancel, busyId }) {
+function BookingCard({ b, who, onConfirm, onDecline, onCancel, onReschedule, busyId }) {
   const card = who === "incoming" ? b.requester : b.vip_card;
   const loading = busyId === b.id;
   return (
@@ -68,7 +69,12 @@ function BookingCard({ b, who, onConfirm, onDecline, onCancel, busyId }) {
           <Button data-testid={`vs-cancel-${b.id}`} size="sm" variant="outline" disabled={loading} onClick={() => onCancel(b.id)} className="bg-white/5 border-white/15 text-slate-300 hover:bg-white/10 h-9">Cancel</Button>
         )}
         {who === "outgoing" && (b.status === "pending" || b.status === "confirmed") && (
-          <Button data-testid={`vs-cancel-${b.id}`} size="sm" variant="outline" disabled={loading} onClick={() => onCancel(b.id)} className="bg-white/5 border-white/15 text-slate-300 hover:bg-white/10 h-9">Cancel</Button>
+          <>
+            {b.status === "pending" && (
+              <Button data-testid={`vs-reschedule-${b.id}`} size="sm" variant="outline" disabled={loading} onClick={() => onReschedule(b)} className="bg-white/5 border-amber-500/40 text-amber-300 hover:bg-amber-500/10 h-9">Reschedule</Button>
+            )}
+            <Button data-testid={`vs-cancel-${b.id}`} size="sm" variant="outline" disabled={loading} onClick={() => onCancel(b.id)} className="bg-white/5 border-white/15 text-slate-300 hover:bg-white/10 h-9">Cancel</Button>
+          </>
         )}
       </div>
     </div>
@@ -91,6 +97,7 @@ export default function VipBookings() {
   const [mine, setMine] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState(null);
+  const [reschedule, setReschedule] = useState(null); // booking being rescheduled
 
   const load = useCallback(async () => {
     try {
@@ -161,8 +168,8 @@ export default function VipBookings() {
           <TabsContent value="mine" className="mt-5 space-y-3">
             {mine.length === 0 ? <Empty icon={Send} text="You haven't requested any VIP dates yet." /> : (
               <>
-                {minePending.map((b) => <BookingCard key={b.id} b={b} who="outgoing" onCancel={cancel} busyId={busyId} />)}
-                {mineConfirmed.map((b) => <BookingCard key={b.id} b={b} who="outgoing" onCancel={cancel} busyId={busyId} />)}
+                {minePending.map((b) => <BookingCard key={b.id} b={b} who="outgoing" onCancel={cancel} onReschedule={setReschedule} busyId={busyId} />)}
+                {mineConfirmed.map((b) => <BookingCard key={b.id} b={b} who="outgoing" onCancel={cancel} onReschedule={setReschedule} busyId={busyId} />)}
                 {minePast.map((b) => <BookingCard key={b.id} b={b} who="outgoing" busyId={busyId} />)}
               </>
             )}
@@ -183,9 +190,19 @@ export default function VipBookings() {
           <h2 className="font-serif-luxe text-xl mb-3 flex items-center gap-2"><Send size={18} className="text-rose-300" /> My date requests</h2>
           <div className="space-y-3">
             {mine.length === 0 ? <Empty icon={Send} text="You haven't requested any VIP dates yet." /> :
-              mine.map((b) => <BookingCard key={b.id} b={b} who="outgoing" onCancel={cancel} busyId={busyId} />)}
+              mine.map((b) => <BookingCard key={b.id} b={b} who="outgoing" onCancel={cancel} onReschedule={setReschedule} busyId={busyId} />)}
           </div>
         </div>
+      )}
+
+      {reschedule && (
+        <VipScheduleBookModal
+          open={!!reschedule}
+          onOpenChange={(o) => { if (!o) setReschedule(null); }}
+          target={{ id: reschedule.vip_id, name: reschedule.vip_card?.name || "VIP" }}
+          rescheduleId={reschedule.id}
+          onDone={() => { setReschedule(null); load(); }}
+        />
       )}
     </div>
   );

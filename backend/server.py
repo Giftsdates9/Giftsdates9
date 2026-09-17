@@ -598,6 +598,8 @@ async def _startup():
     await db.vip_sched.create_index([("requester_id", 1), ("status", 1)])
     for idea in build_catalog():
         await db.date_ideas.update_one({"id": idea["id"]}, {"$setOnInsert": idea}, upsert=True)
+    import asyncio
+    asyncio.create_task(_vs_reminder_loop())
     logging.info("GiftsDates backend ready")
 
 # ---------- Meta ----------
@@ -2643,7 +2645,140 @@ async def vs_my_requests(user=Depends(get_current_user)):
         b["vip_card"] = {"id": b["vip_id"], "name": (vip or {}).get("name") or "VIP", "photo": ((vip or {}).get("photos") or [None])[0]}
         out.append(b)
     return {"requests": out}
+
+# ---- Recurring weekly availability ----
+class VipRecurringReq(BaseModel):
+    weekdays: List[int]        # 0=Mon .. 6=Sun
+    start: str                 # HH:MM
+    end: str                   # HH:MM
+    slot_len: int = 60
+    weeks: int = 8             # how many weeks ahead to generate
+    tz: Optional[str] = None
+
+@api.post("/vip/schedule/availability/recurring")
+async def vs_add_recurring(req: VipRecurringReq, user=Depends(get_current_user)):
+    if not is_vip(user):
+        raise HTTPException(403, "VIP_REQUIRED")
+    wds = sorted({int(w) for w in (req.weekdays or []) if 0 <= int(w) <= 6})
+    if not wds:
+        raise HTTPException(400, "NO_WEEKDAYS")
+    s, e = _hm_to_min(req.start), _hm_to_min(req.end)
+    if s >= e:
+        raise HTTPException(400, "BAD_WINDOW")
+    slot_len = max(15, min(240, int(req.slot_len or 60)))
+    if e - s < slot_len:
+        raise HTTPException(400, "WINDOW_TOO_SHORT")
+    weeks = max(1, min(26, int(req.weeks or 8)))
+    tz = (req.tz or user.get("timezone") or "UTC")
+    today = datetime.now(timezone.utc).date()
+    created = []
+    for i in range(weeks * 7 + 1):
+        d = today + timedelta(days=i)
+        if d.weekday() not in wds:
+            continue
+        dk = d.strftime("%Y-%m-%d")
+        exists = await db.vip_avail.find_one({"vip_id": user["id"], "date": dk, "start": _min_to_hm(s), "end": _min_to_hm(e)})
+        if exists:
+            continue
+        doc = {"id": str(uuid.uuid4()), "vip_id": user["id"], "date": dk,
+               "start": _min_to_hm(s), "end": _min_to_hm(e), "slot_len": slot_len, "tz": tz,
+               "recurring": True, "created_at": datetime.now(timezone.utc).isoformat()}
+        await db.vip_avail.insert_one(doc)
+        created.append(_vs_clean(doc))
+    return {"created": len(created), "blocks": created}
+
+# ---- Reschedule a pending request ----
+class VipRescheduleReq(BaseModel):
+    date: str
+    start: str
+    end: str
+
+@api.post("/vip/schedule/bookings/{bid}/reschedule")
+async def vs_reschedule(bid: str, req: VipRescheduleReq, user=Depends(get_current_user)):
+    b = await db.vip_sched.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Not found")
+    if b["requester_id"] != user["id"]:
+        raise HTTPException(403, "Only the requester can reschedule")
+    if b["status"] != "pending":
+        raise HTTPException(400, "NOT_PENDING")
+    ns, ne = _hm_to_min(req.start), _hm_to_min(req.end)
+    if ns >= ne:
+        raise HTTPException(400, "BAD_TIME")
+    vip_id = b["vip_id"]
+    blocks = await db.vip_avail.find({"vip_id": vip_id, "date": req.date}, {"_id": 0}).to_list(200)
+    fits = any(_hm_to_min(bl["start"]) <= ns and ne <= _hm_to_min(bl["end"]) for bl in blocks)
+    if not fits:
+        raise HTTPException(400, "TIME_UNAVAILABLE")
+    active = await db.vip_sched.find({"vip_id": vip_id, "date": req.date, "status": {"$in": VIP_SCHED_ACTIVE}, "id": {"$ne": bid}},
+                                     {"_id": 0, "start": 1, "end": 1}).to_list(500)
+    if _vs_conflict(ns, ne, active):
+        raise HTTPException(409, "SLOT_TAKEN")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.vip_sched.update_one({"id": bid}, {"$set": {
+        "date": req.date, "start": req.start, "end": req.end,
+        "lock_start": _min_to_hm(max(0, ns - VIP_SCHED_BUFFER)), "lock_end": _min_to_hm(ne + VIP_SCHED_BUFFER),
+        "scheduled_at": f"{req.date}T{req.start}:00", "rescheduled_at": now, "reminder_30_sent": False}})
+    await notify(vip_id, "vs_rescheduled", "Date request updated 🔁",
+                 f"{user['name']} proposed a new time: {req.date} · {req.start}–{req.end}. Confirm or decline in VIP Bookings.",
+                 {"booking_id": bid}, email=True, link=f"{PUBLIC_APP_URL}/vip-bookings", cta="Open VIP Bookings")
+    return {"status": "pending", "date": req.date, "start": req.start, "end": req.end}
+
+# ---- Background loop: 30-min reminders + auto-complete ----
+def _vs_start_dt(b: dict):
+    try:
+        tzinfo = ZoneInfo(b.get("tz") or "UTC")
+    except Exception:
+        tzinfo = ZoneInfo("UTC")
+    try:
+        return datetime.fromisoformat(f"{b['date']}T{b['start']}:00").replace(tzinfo=tzinfo).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _vs_end_dt(b: dict):
+    try:
+        tzinfo = ZoneInfo(b.get("tz") or "UTC")
+    except Exception:
+        tzinfo = ZoneInfo("UTC")
+    try:
+        return datetime.fromisoformat(f"{b['date']}T{b['end']}:00").replace(tzinfo=tzinfo).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+async def _vs_tick():
+    """Fire 30-minute reminders to both parties and auto-complete finished confirmed dates."""
+    now = datetime.now(timezone.utc)
+    conf = await db.vip_sched.find({"status": "confirmed"}, {"_id": 0}).to_list(1000)
+    for b in conf:
+        start_dt = _vs_start_dt(b)
+        end_dt = _vs_end_dt(b)
+        # 30-min reminder
+        if start_dt and not b.get("reminder_30_sent") and (start_dt - timedelta(minutes=30)) <= now < start_dt:
+            when = f"{b['date']} · {b['start']}–{b['end']} ({b.get('tz', 'UTC')})"
+            for uid in (b["vip_id"], b["requester_id"]):
+                await notify(uid, "vs_reminder", "Your date starts in 30 minutes ⏰",
+                             f"Reminder: your date is at {when}. Get ready!", {"booking_id": b["id"]},
+                             email=True, link=f"{PUBLIC_APP_URL}/vip-bookings", cta="Open VIP Bookings")
+            await db.vip_sched.update_one({"id": b["id"]}, {"$set": {"reminder_30_sent": True}})
+        # auto-complete
+        if end_dt and end_dt <= now:
+            coins = int(b.get("coins") or 0)
+            await db.vip_sched.update_one({"id": b["id"]}, {"$set": {"status": "completed", "completed_at": now.isoformat()}})
+            if coins:
+                await db.users.update_one({"id": b["vip_id"]}, {"$inc": {"escrow": -coins, "withdrawable": coins}})
+            await notify(b["requester_id"], "vs_completed", "Date completed ✅",
+                         f"Your date on {b['date']} at {b['start']} is marked completed.", {"booking_id": b["id"]})
+
+async def _vs_reminder_loop():
+    import asyncio
+    while True:
+        try:
+            await _vs_tick()
+        except Exception as ex:
+            logging.error(f"vip-schedule reminder loop error: {ex}")
+        await asyncio.sleep(60)
 # ==================== end VIP Scheduling ====================
+
 
 
 class CoinPremiumReq(BaseModel):

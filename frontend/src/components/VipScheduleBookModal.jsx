@@ -23,7 +23,7 @@ const STATE_STYLE = {
 };
 const STATE_LABEL = { available: "Available", pending: "Pending", confirmed: "Confirmed", locked: "Locked" };
 
-export default function VipScheduleBookModal({ open, onOpenChange, target, defaultCoins }) {
+export default function VipScheduleBookModal({ open, onOpenChange, target, defaultCoins, rescheduleId, onDone }) {
   const { user, meta, refreshUser } = useApp();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState({ days: [], tz: "UTC", buffer: 15 });
@@ -32,6 +32,7 @@ export default function VipScheduleBookModal({ open, onOpenChange, target, defau
   const [activity, setActivity] = useState("");
   const [coins, setCoins] = useState(defaultCoins || meta?.date_min_coins || 300);
   const [busy, setBusy] = useState(false);
+  const isReschedule = !!rescheduleId;
 
   const load = useCallback(() => {
     if (!target?.id) return;
@@ -55,15 +56,21 @@ export default function VipScheduleBookModal({ open, onOpenChange, target, defau
 
   const submit = async () => {
     if (!slot) { toast.error("Pick an available time slot"); return; }
-    if (((user?.coins || 0) + (user?.withdrawable || 0)) < coins) { toast.error("Not enough coins"); return; }
+    if (!isReschedule && ((user?.coins || 0) + (user?.withdrawable || 0)) < coins) { toast.error("Not enough coins"); return; }
     setBusy(true);
     try {
-      await api.post(`/vip/schedule/${target.id}/book`, {
-        date: day, start: slot.start, end: slot.end, coins,
-        activity, venue: activity, tz: dayObj?.tz,
-      });
+      if (isReschedule) {
+        await api.post(`/vip/schedule/bookings/${rescheduleId}/reschedule`, { date: day, start: slot.start, end: slot.end });
+        toast.success("New time proposed — waiting for VIP confirmation");
+      } else {
+        await api.post(`/vip/schedule/${target.id}/book`, {
+          date: day, start: slot.start, end: slot.end, coins,
+          activity, venue: activity, tz: dayObj?.tz,
+        });
+        toast.success("Request sent — waiting for VIP confirmation");
+      }
       await refreshUser();
-      toast.success("Request sent — waiting for VIP confirmation");
+      onDone?.();
       onOpenChange(false);
     } catch (e) {
       const d = e.response?.data?.detail || "";
@@ -71,6 +78,7 @@ export default function VipScheduleBookModal({ open, onOpenChange, target, defau
         d === "SLOT_TAKEN" ? "That time was just taken. Please pick another slot."
           : d === "TIME_UNAVAILABLE" ? "This time is not available."
           : d === "CANNOT_BOOK_SELF" ? "You cannot book yourself."
+          : d === "NOT_PENDING" ? "This booking can no longer be rescheduled."
           : d === "Insufficient coins" ? "Not enough coins."
           : d || "Could not book");
       if (d === "SLOT_TAKEN") load();
@@ -82,7 +90,7 @@ export default function VipScheduleBookModal({ open, onOpenChange, target, defau
       <DialogContent className="bg-[#161320] border-white/10 text-white max-w-lg max-h-[88vh] overflow-y-auto" data-testid="vs-book-dialog">
         <DialogHeader>
           <DialogTitle className="font-serif-luxe text-2xl flex items-center gap-2">
-            <Calendar size={20} className="text-amber-300" /> Book a date · {target?.name}
+            <Calendar size={20} className="text-amber-300" /> {isReschedule ? "Propose a new time" : "Book a date"} · {target?.name}
           </DialogTitle>
         </DialogHeader>
 
@@ -139,24 +147,26 @@ export default function VipScheduleBookModal({ open, onOpenChange, target, defau
               </div>
             </div>
 
-            <div>
+            <div className={isReschedule ? "hidden" : ""}>
               <Label className="text-xs text-slate-400">Date / activity</Label>
               <Input data-testid="vs-book-activity" value={activity} onChange={(e) => setActivity(e.target.value)}
                 placeholder="Dinner at Le Bernardin" className="bg-white/5 border-white/10 mt-1" />
             </div>
 
-            <div>
+            <div className={isReschedule ? "hidden" : ""}>
               <Label className="text-xs text-slate-400">Coins (held in escrow, min {meta?.date_min_coins || 300})</Label>
               <Input data-testid="vs-book-coins" type="number" min={meta?.date_min_coins || 300} step="50" value={coins}
                 onChange={(e) => setCoins(parseInt(e.target.value || 0))} className="bg-white/5 border-white/10 mt-1" />
             </div>
 
             <div className="text-xs text-slate-400 glass rounded-lg p-3">
-              🔒 Your coins are held in escrow. The VIP has 15-minute buffers before and after each booking. You'll be notified when the VIP confirms or declines.
+              {isReschedule
+                ? "🔁 Your coins stay in escrow. The VIP will be asked to confirm the new time you propose."
+                : "🔒 Your coins are held in escrow. The VIP has 15-minute buffers before and after each booking. You'll be notified when the VIP confirms or declines."}
             </div>
 
             <Button data-testid="vs-book-submit" disabled={busy || !slot} onClick={submit} className="rose-btn text-white border-0 w-full h-11">
-              {busy ? <Loader2 size={16} className="animate-spin" /> : <>Request date · 🪙 {coins}</>}
+              {busy ? <Loader2 size={16} className="animate-spin" /> : (isReschedule ? <>Propose new time</> : <>Request date · 🪙 {coins}</>)}
             </Button>
           </div>
         )}

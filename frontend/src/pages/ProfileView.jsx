@@ -11,6 +11,7 @@ import { optLabel } from "../components/ProfileDetailsForm";
 import GiftModal from "../components/GiftModal";
 import { ReportModal } from "../components/ReportModal";
 import VipSection from "../components/VipSection";
+import ProfileScheduleCard from "../components/ProfileScheduleCard";
 import { GiftPremiumModal } from "../components/GiftPremiumModal";
 import { Crown as CrownGift } from "lucide-react";
 import { Flag } from "lucide-react";
@@ -221,6 +222,7 @@ export default function ProfileView() {
       <InviteDateModal open={modal === "date"} onOpenChange={(v) => !v && setModal(null)} target={p} />
       <ReportModal open={modal === "report"} onOpenChange={(v) => !v && setModal(null)} target={p} />
       <GiftPremiumModal open={modal === "giftpremium"} onOpenChange={(v) => !v && setModal(null)} target={p} />
+      <div className="max-w-5xl mx-auto px-4"><ProfileScheduleCard profile={p} /></div>
       <div className="max-w-5xl mx-auto px-4"><VipSection userId={p.id} name={p.name} preview={previewGuest ? "nonvip" : (previewVip ? "vip" : undefined)} /></div>
     </div>
   );
