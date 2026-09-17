@@ -256,3 +256,27 @@ test_plan_vip_ui:
 agent_communication_vip_ui:
     -agent: "testing"
     -message: "✅ VIP SCHEDULING UI TESTING COMPLETE - 5 OUT OF 6 FLOWS FULLY WORKING. Successfully tested: (1) VIP Availability (single + recurring) - WORKING, (2) Booking from calendar - WORKING, (3) VIP receives request + badge - WORKING, (4) Confirm booking - WORKING, (5) Decline + refund - WORKING. Partially tested: (6) Reschedule - booking created but couldn't access 'My Requests' tab as non-VIP user. CRITICAL DESIGN ISSUE: VIP Scheduling 'Book from calendar' button is inside VipSection component which returns null when VIP profile is locked. This means regular users (non-premium) cannot book from a VIP's calendar unless they pay to unlock the profile or have premium status. This creates an unnecessary barrier. RECOMMENDATION: Move the VIP Scheduling booking button outside the VIP profile lock check, or create a separate section for VIP Scheduling that's always visible when a user has published availability, regardless of VIP profile lock status. WORKAROUND USED FOR TESTING: Made User B premium (premium_until:2030-01-01) so they could see unlocked VIP section and access booking button. All core VIP Scheduling features are working correctly once the VIP section is accessible."
+
+backend_stripe_checkout:
+  - task: "Stripe Checkout Integration: Create checkout sessions for coin packages, premium, VIP, custom amounts"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Stripe checkout integration activated with Emergent claimable sandbox keys. POST /api/payments/checkout creates Stripe checkout sessions for coin packages (starter, popular, etc.), premium_monthly, vip_monthly (subscription), and custom amounts. GET /api/payments/status/{session_id} retrieves payment status. Transactions stored in payment_transactions collection with status='initiated' and payment_status='pending'."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ FULLY TESTED AND WORKING - ALL 5 TESTS PASSED. Created comprehensive test suite in /app/stripe_checkout_test.py. Test Results: (1) ✅ POST /api/payments/checkout with package_id='starter' - Returned 200 with checkout_url='https://checkout.stripe.com/c/pay/cs_test_...' and session_id. Transaction inserted in DB with status='initiated' and payment_status='pending'. (2) ✅ POST /api/payments/checkout with package_id='premium_monthly' (one-time payment) - Returned 200 with valid checkout_url. Transaction inserted correctly. (3) ✅ POST /api/payments/checkout with package_id='vip_monthly' (subscription mode) - Returned 200 with valid checkout_url. Transaction inserted correctly with amount=$49.99. (4) ✅ POST /api/payments/checkout with package_id='custom' and usd_amount=25 - Returned 200 with valid checkout_url. Transaction inserted correctly with amount=$25.0. (5) ✅ GET /api/payments/status/{session_id} (unauthenticated) - Returned 200 with session_id, status='initiated', payment_status='pending'. Endpoint works without authentication as expected. NO CRITICAL ISSUES FOUND. All checkout sessions created successfully against live Stripe sandbox. All checkout_urls start with 'https://checkout.stripe.com'. All payment_transactions docs inserted with correct status fields. Status endpoint retrieves transaction data correctly."
+
+test_plan_stripe:
+  current_focus: []
+  test_priority: "high_first"
+
+agent_communication_stripe:
+    -agent: "testing"
+    -message: "✅ STRIPE CHECKOUT INTEGRATION - ALL 5 TESTS PASSED. Verified newly-activated Stripe checkout on GiftsDates backend. Setup: Registered test user stripe_test_2275a283@example.com via POST /api/auth/register, obtained JWT token. Test Results: (1) ✅ Coin package checkout (starter) - checkout_url valid, session created, DB transaction correct. (2) ✅ Premium monthly (one-time payment) - checkout_url valid, session created. (3) ✅ VIP monthly (subscription mode) - checkout_url valid, session created with $49.99. (4) ✅ Custom amount ($25) - checkout_url valid, session created. (5) ✅ Payment status endpoint - unauthenticated GET works, returns pending status. All checkout_urls start with 'https://checkout.stripe.com'. All payment_transactions docs have status='initiated' and payment_status='pending'. Stripe sandbox integration working perfectly. Did NOT attempt actual card payment (no browser) as instructed. All requirements from review request met."
