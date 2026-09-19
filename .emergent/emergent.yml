@@ -1,3 +1,5 @@
 {
-  "env_image_name": "fastapi_react_mongo_shadcn_base_image_cloud_arm:release-16092026-2"
+  "env_image_name": "fastapi_react_mongo_shadcn_base_image_cloud_arm:release-16092026-2",
+  "job_id": "f116c718-1b38-4d52-96d4-f2fb369bcef5",
+  "created_at": "2026-09-19T17:36:06.449239+00:00Z"
 }
